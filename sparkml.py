@@ -1,18 +1,21 @@
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import LinearRegression
 import happybase
 
-# Step 1: Create a Spark session with Hive support
+# Step 1: Start Spark session with Hive support
 spark = SparkSession.builder.appName("EmployeePerformanceRegression").enableHiveSupport().getOrCreate()
 
-# Step 2: Load the data from the Hive table 'employee_performance'
+# Step 2: Load from Hive (all strings originally)
 df = spark.sql("SELECT Experience_Years, Monthly_Sales FROM employee_performance")
 
-# Step 3: Handle null values by dropping rows with missing data
-df = df.na.drop()
+# Step 3: Cast columns to integer for regression
+df = df.withColumn("Experience_Years", col("Experience_Years").cast("int")) \
+       .withColumn("Monthly_Sales", col("Monthly_Sales").cast("int")) \
+       .na.drop()
 
-# Step 4: Prepare data for MLlib (feature vector assembly)
+# Step 4: Assemble features into vector
 assembler = VectorAssembler(
     inputCols=["Experience_Years"],
     outputCol="features",
@@ -20,30 +23,28 @@ assembler = VectorAssembler(
 )
 assembled_df = assembler.transform(df).select("features", "Monthly_Sales")
 
-# Step 5: Split the data into training and testing sets
+# Step 5: Split into train/test
 train_data, test_data = assembled_df.randomSplit([0.7, 0.3], seed=42)
 
-# Step 6: Initialize and train a Linear Regression model
+# Step 6: Train linear regression model
 lr = LinearRegression(labelCol="Monthly_Sales")
 lr_model = lr.fit(train_data)
 
-# Step 7: Evaluate the model on the test data
+# Step 7: Evaluate model
 test_results = lr_model.evaluate(test_data)
-
-# Step 8: Print the model performance metrics
 print(f"RMSE: {test_results.rootMeanSquaredError}")
 print(f"R^2: {test_results.r2}")
 
-# ---- Write metrics to HBase ----
+# Step 8: Write metrics to HBase
 data = [
     ('metrics1', 'cf:rmse', str(test_results.rootMeanSquaredError)),
-    ('metrics1', 'cf:r2',   str(test_results.r2)),
+    ('metrics1', 'cf:r2', str(test_results.r2))
 ]
 
 def write_to_hbase_partition(partition):
-    connection = happybase.Connection('master')  # Update if your HBase host differs
+    connection = happybase.Connection('master')  # Update host if needed
     connection.open()
-    table = connection.table('employee_metrics')  # <-- update table name as needed
+    table = connection.table('employee_metrics')
     for row in partition:
         row_key, column, value = row
         table.put(row_key, {column: value})
@@ -52,5 +53,5 @@ def write_to_hbase_partition(partition):
 rdd = spark.sparkContext.parallelize(data)
 rdd.foreachPartition(write_to_hbase_partition)
 
-# Step 9: Stop Spark session
+# Step 9: Stop Spark
 spark.stop()
